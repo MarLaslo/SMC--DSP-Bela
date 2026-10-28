@@ -1,0 +1,163 @@
+/** SMC26 DSP course - beginner step 3 of 3: buttons.
+ *
+ *  Now it's an instrument: the tone only plays while you hold a
+ *  button, and a second button changes the sound's color. The knob
+ *  from step 2 still sets the pitch.
+ *
+ *  What you learn here:
+ *    - buttons: Update() them every render(), then ask JustPressed() /
+ *      JustReleased()
+ *    - NoteOn() / NoteOff() and the envelope: how a note fades in
+ *      when it starts and fades out when it stops
+ *    - "if": only do something when a condition is true
+ *
+ *  Try changing:
+ *    - the envelope times in setup() - e.g. SetAmpAttack(1.f) for a
+ *      slow fade in, SetAmpRelease(2.f) for a long fade out
+ *    - the order of the waveforms in "waves", or remove one
+ *
+ *  Where next: examples/instruments/ - full instruments built from
+ *  exactly these pieces.
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton - D0     pitchKnob - A0
+ *    waveButton - D1
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down) - without the resistor
+ *  the button doesn't work.
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+// NEW: two buttons
+Button playButton;
+Button waveButton;
+
+// The knob from step 2
+Potentiometer pitchKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value - only when gPrintValues is true
+void PrintValues(BelaContext *context)
+{
+	PrintValue("playButton", playButton.IsPressed());
+	PrintValue("waveButton", waveButton.IsPressed());
+	PrintValue("pitchKnob", dsp::FullRange(pitchKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The oscillator from steps 1 and 2
+dsp::Oscillator osc;
+
+// NEW: a list of the four waveforms, for waveButton to step through.
+// waves[0] is the first one (sine), waves[3] the last (saw).
+dsp::Oscillator::Waveform waves[4] = {
+	dsp::Oscillator::WAVE_SINE,     // smooth and pure, like a whistle
+	dsp::Oscillator::WAVE_TRIANGLE, // soft, a bit like a flute
+	dsp::Oscillator::WAVE_SQUARE,   // hollow, like an old video game
+	dsp::Oscillator::WAVE_SAW,      // bright and buzzy
+};
+
+// Which waveform from "waves" is playing: starts at 0 (sine)
+int gWaveNumber = 0;
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+void render(BelaContext *context, void *userData)
+{
+	// NEW: buttons need Update() every time render() runs, so they
+	// notice when they're pressed or let go
+	playButton.Update(context);
+	waveButton.Update(context);
+
+	// JustPressed() is true only at the moment the button goes down -
+	// so the note starts once, not hundreds of times a second
+	if(playButton.JustPressed())
+		osc.NoteOn();
+
+	// JustReleased() is true only at the moment it comes up
+	if(playButton.JustReleased())
+		osc.NoteOff();
+
+	// Each press of waveButton moves to the next waveform. After the
+	// last one (3), go back to the first (0).
+	if(waveButton.JustPressed())
+	{
+		gWaveNumber = gWaveNumber + 1;
+		if(gWaveNumber > 3)
+			gWaveNumber = 0;
+
+		osc.SetWaveform(waves[gWaveNumber]);
+	}
+
+	// The pitch knob, the same as step 2
+	osc.SetFreq(dsp::MapExponential(dsp::FullRange(pitchKnob.Read(context)), 110.f, 880.f));
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// The same as steps 1 and 2
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		float sample = osc.Process();
+
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0); // digital pin D0
+	waveButton.Init(context, 1); // digital pin D1
+	pitchKnob.Init(0);           // analog input A0
+
+	osc.Init(context->audioSampleRate);
+
+	// NEW: the envelope - how the volume changes over a note, in
+	// seconds. Attack = fade in after NoteOn(). Release = fade out
+	// after NoteOff(). (There's also decay and sustain - see the
+	// instruments examples.)
+	osc.SetAmpAttack(0.02f);
+	osc.SetAmpRelease(0.3f);
+
+	// No NoteOn() here any more - the button does it now
+
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

@@ -1,0 +1,125 @@
+/** SMC26 DSP course - beginner step 2 of 3: one knob.
+ *
+ *  The tone from step 1, but now a knob changes its pitch while it
+ *  plays.
+ *
+ *  What you learn here:
+ *    - how to add a sensor: declare it, Init() it on a pin, Read() it
+ *    - a knob gives a number from 0 to 1 - and how to turn that into
+ *      a useful range (here: a pitch in Hz)
+ *    - the top of render(): it runs over and over, reading the knob
+ *      and updating the sound
+ *
+ *  Try changing:
+ *    - 110.f and 880.f - the lowest and highest pitch the knob reaches
+ *    - MapExponential to MapLinear, and listen to how the knob feels
+ *    - gPrintValues to true, to see the knob's value in the terminal
+ *
+ *  Next step: 03_one_button.cpp.txt - play notes with a button.
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    pitchKnob - A0
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+// NEW: a knob (also called a potentiometer). Like the oscillator,
+// "Potentiometer" is the kind of thing and "pitchKnob" is its name.
+Potentiometer pitchKnob;
+
+// Change false to true to print the knob's value in the terminal
+bool gPrintValues = false;
+
+// Prints the knob's value - only when gPrintValues is true
+void PrintValues(BelaContext *context)
+{
+	PrintValue("pitchKnob", dsp::FullRange(pitchKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The oscillator from step 1
+dsp::Oscillator osc;
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+void render(BelaContext *context, void *userData)
+{
+	// NEW: render() runs over and over, hundreds of times a second.
+	// Each time, before making the sound, read the knob and set the
+	// pitch.
+
+	// Read() gives the knob's position: 0 = all the way left,
+	// 1 = all the way right, 0.5 = in the middle. FullRange() is
+	// needed because the knob runs on 3.3V but Bela measures up to
+	// 4.096V - without it, all the way right would only give 0.806.
+	float knob = dsp::FullRange(pitchKnob.Read(context));
+
+	// Turn 0 - 1 into 110 - 880 Hz. MapExponential makes every bit of
+	// the knob move the pitch by the same musical amount - the same
+	// way a piano keyboard works (see dsp/Utility.h).
+	float pitch = dsp::MapExponential(knob, 110.f, 880.f);
+
+	// Tell the oscillator its new pitch
+	osc.SetFreq(pitch);
+
+	// About 10 times a second, print the knob's value - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// The same as step 1: ask the oscillator for each sample and send
+	// it out
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		float sample = osc.Process();
+
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// NEW: tell the knob which analog input it is plugged into.
+	// Every sensor needs one Init() line here.
+	pitchKnob.Init(0); // analog input A0
+
+	// Set up the oscillator and start the note, the same as step 1.
+	// No SetFreq() here - the knob sets it in render().
+	osc.Init(context->audioSampleRate);
+	osc.SetWaveform(dsp::Oscillator::WAVE_SINE);
+	osc.NoteOn();
+
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

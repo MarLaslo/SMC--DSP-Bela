@@ -1,0 +1,116 @@
+/** SMC26 DSP course example: sensor printing.
+ *
+ *  Reads both buttons and all five knobs and prints their values in
+ *  the terminal about 10 times a second. Makes no sound; use it to
+ *  check your wiring.
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    button1 - D0     knob1 - A0     knob4 - A3
+ *    button2 - D1     knob2 - A1     knob5 - A4
+ *                     knob3 - A2
+ *  Buttons: pin to 3.3V when pressed, 10k from the pin to GND
+ *  (a pull-down). Knobs: outer legs to 3.3V and GND, middle to the input.
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button button1;
+Button button2;
+
+Potentiometer knob1;
+Potentiometer knob2;
+Potentiometer knob3;
+Potentiometer knob4;
+Potentiometer knob5;
+
+// Prints every sensor's value on one line, e.g.
+//   button1: 0   button2: 1   knob1: 0.512   ...
+// Buttons print 1 (pressed) or 0; knobs print 0.000 to 1.000
+// (FullRange() stretches a 3.3V knob to the whole 0 - 1, see
+// dsp/Utility.h).
+void PrintValues(BelaContext *context)
+{
+	PrintValue("button1", button1.IsPressed());
+	PrintValue("button2", button2.IsPressed());
+	PrintValue("knob1", dsp::FullRange(knob1.Read(context)));
+	PrintValue("knob2", dsp::FullRange(knob2.Read(context)));
+	PrintValue("knob3", dsp::FullRange(knob3.Read(context)));
+	PrintValue("knob4", dsp::FullRange(knob4.Read(context)));
+	PrintValue("knob5", dsp::FullRange(knob5.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// None in this example.
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast. Here it reads the
+// sensors, prints them, and sends silence.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons, so IsPressed() sees the latest press
+	button1.Update(context);
+	button2.Update(context);
+
+	// About 10 times a second, print the sensor values
+	if(TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// Silence (a sample is a number from -1 to 1)
+		float sample = 0.f;
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	button1.Init(context, 0); // digital pin D0
+	button2.Init(context, 1); // digital pin D1
+
+	knob1.Init(0); // analog input A0
+	knob2.Init(1);
+	knob3.Init(2);
+	knob4.Init(3);
+	knob5.Init(4);
+
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}
