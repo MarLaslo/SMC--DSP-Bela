@@ -1,0 +1,189 @@
+/** SMC26 DSP course example: try a sound with sliders in the browser.
+ *
+ *  No sensors needed: Bela can show sliders on a web page, and your
+ *  code reads them just like knobs. Use it to try out a sound before
+ *  anything is wired - then swap each slider for a real knob.
+ *
+ *  The sound is a subtractive synth (waveform -> filter -> envelope).
+ *  The sliders:
+ *    play       0 = off, 1 = plays a note (like holding a button)
+ *    wave       0 = saw, 1 = square, 2 = triangle
+ *    note       the note (A minor scale, one octave up/down)
+ *    cutoff     the filter: low = dark and muffled, high = bright
+ *    resonance  makes the filter "sing" around the cutoff
+ *    volume     overall volume
+ *
+ *  The sliders note, cutoff, resonance and volume go from 0 to 1,
+ *  exactly like dsp::FullRange(knob.Read(context)). So to move one to
+ *  a real knob later, change only the line that reads it, e.g.
+ *    controller.getSliderValue(gCutoffSlider)
+ *  becomes
+ *    dsp::FullRange(cutoffKnob.Read(context))
+ *
+ *  To open the sliders: go to http://192.168.7.2/gui in a browser
+ *  (or click the GUI button in the Bela IDE).
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring: nothing - only the audio output.
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// Bela's browser page (Gui) and the sliders on it (GuiController).
+// They are Bela libraries, not dsp:: ones, so you can look them up in
+// the Bela documentation.
+#include <libraries/Gui/Gui.h>
+#include <libraries/GuiController/GuiController.h>
+
+// ---------------------------------------------------------------------
+// 1. Sensors (here: sliders in the browser)
+// ---------------------------------------------------------------------
+
+// The web page, and the box of sliders on it
+Gui gui;
+GuiController controller;
+
+// Each slider gets a number when it is made in setup(). Keep it, to
+// read that slider in render().
+unsigned int gPlaySlider;
+unsigned int gWaveSlider;
+unsigned int gNoteSlider;
+unsigned int gCutoffSlider;
+unsigned int gResonanceSlider;
+unsigned int gVolumeSlider;
+
+// Change false to true to print the slider values in the terminal
+bool gPrintValues = false;
+
+// Prints every slider's value on one line. Add a line here for each
+// slider you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", controller.getSliderValue(gPlaySlider));
+	PrintValue("wave", controller.getSliderValue(gWaveSlider));
+	PrintValue("note", controller.getSliderValue(gNoteSlider));
+	PrintValue("cutoff", controller.getSliderValue(gCutoffSlider));
+	PrintValue("resonance", controller.getSliderValue(gResonanceSlider));
+	PrintValue("volume", controller.getSliderValue(gVolumeSlider));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The subtractive voice: waveform -> filter -> volume envelope
+dsp::Subtractive synth;
+
+// The three waveforms the wave slider picks from
+const int kNumWaves = 3;
+dsp::Subtractive::Waveform gWaves[kNumWaves] = {
+	dsp::Subtractive::WAVE_SAW,
+	dsp::Subtractive::WAVE_SQUARE,
+	dsp::Subtractive::WAVE_TRIANGLE,
+};
+
+// The note the note slider is centered on
+float gRootNote = dsp::NoteToFreq("A3");
+
+// Is the note playing right now? Used to spot the moment the play
+// slider changes, like a button's JustPressed() and JustReleased().
+bool gPlaying = false;
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Play slider: start the note when it goes to 1, stop it when it
+	// goes back to 0
+	bool play = controller.getSliderValue(gPlaySlider) > 0.5f;
+	if(play && !gPlaying)
+		synth.NoteOn();
+	if(!play && gPlaying)
+		synth.NoteOff();
+	gPlaying = play;
+
+	// Wave slider: 0, 1 or 2. Clamp keeps it a valid number for the
+	// list of waveforms.
+	int wave = dsp::Clamp(controller.getSliderValue(gWaveSlider), 0.f, kNumWaves - 1);
+	synth.SetWaveform(gWaves[wave]);
+
+	// From here on, every slider goes from 0 to 1, like a knob.
+	// Note: snaps to the notes of A minor, an octave either way.
+	synth.SetFreq(dsp::MapSemitones(controller.getSliderValue(gNoteSlider), gRootNote, 12.f, dsp::SCALE_MINOR));
+
+	// Cutoff: MapExponential so the slider feels even across its whole
+	// travel (see dsp/Utility.h)
+	synth.SetCutoff(dsp::MapExponential(controller.getSliderValue(gCutoffSlider), 80.f, 5000.f));
+
+	// Resonance stops at 0.9 - from about 1 upward the filter whistles
+	// on its own
+	synth.SetResonance(dsp::MapLinear(controller.getSliderValue(gResonanceSlider), 0.f, 0.9f));
+
+	// Volume from -30 dB (quiet) to 0 dB (full)
+	float volumeDb = dsp::MapLinear(controller.getSliderValue(gVolumeSlider), -30.f, 0.f);
+
+	// About 10 times a second, print the slider values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The next sample of the synth, at the volume set above
+		float sample = dsp::ApplyGain(synth.Process(), volumeDb);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Start the web page, and put a box of sliders called "Synth" on it
+	gui.setup(context->projectName);
+	controller.setup(&gui, "Synth");
+
+	// Make the sliders: name, start value, lowest, highest, step.
+	// A step of 1 means whole numbers only (0, 1, 2, ...).
+	gPlaySlider = controller.addSlider("play", 0, 0, 1, 1);
+	gWaveSlider = controller.addSlider("wave", 0, 0, kNumWaves - 1, 1);
+	gNoteSlider = controller.addSlider("note", 0.5, 0, 1, 0.001);
+	gCutoffSlider = controller.addSlider("cutoff", 0.5, 0, 1, 0.001);
+	gResonanceSlider = controller.addSlider("resonance", 0.3, 0, 1, 0.001);
+	gVolumeSlider = controller.addSlider("volume", 0.7, 0, 1, 0.001);
+
+	// The synth needs to know the sample rate
+	synth.Init(context->audioSampleRate);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

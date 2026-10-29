@@ -1,0 +1,193 @@
+/** SMC26 DSP course example: see the sound on the oscilloscope.
+ *
+ *  An oscilloscope draws a sound as a line: time goes left to right,
+ *  and the line goes up and down with the sound. Bela has one built
+ *  in, in the browser - so you can SEE what a waveform or a filter
+ *  does while you hear it.
+ *
+ *  The scope shows two lines here:
+ *    channel 1 - the raw oscillator, before the filter
+ *    channel 2 - the same sound after the lowpass filter
+ *  Turn cutoffKnob down and watch the sharp corners of the saw and
+ *  square get rounded off - that is the filter taking away the high
+ *  harmonics, and why the sound gets darker.
+ *
+ *  Hold playButton to play a note. Press waveButton to step through
+ *  sine, saw, square and triangle.
+ *
+ *  pitchKnob      the note: low = wide waves, high = narrow waves
+ *  cutoffKnob     the filter: low = dark and round, high = bright
+ *  resonanceKnob  makes the filter ring - watch the wobble on each edge
+ *
+ *  To open the scope: click the oscilloscope button in the Bela IDE,
+ *  or go to http://192.168.7.2/scope in a browser. If the line runs
+ *  across the screen instead of standing still, set the trigger to
+ *  channel 1 in the scope's settings. Zoom in and out with the time
+ *  scale (horizontal) setting.
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton - D0     pitchKnob     - A0
+ *    waveButton - D1     cutoffKnob    - A1
+ *                        resonanceKnob - A2
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// Bela's oscilloscope. It is a Bela library, not a dsp:: one, so you
+// can look it up in the Bela documentation ("Scope").
+#include <libraries/Scope/Scope.h>
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playButton;
+Button waveButton;
+
+Potentiometer pitchKnob;
+Potentiometer cutoffKnob;
+Potentiometer resonanceKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", playButton.IsPressed());
+	PrintValue("wave", waveButton.Count());
+	PrintValue("pitch", dsp::FullRange(pitchKnob.Read(context)));
+	PrintValue("cutoff", dsp::FullRange(cutoffKnob.Read(context)));
+	PrintValue("resonance", dsp::FullRange(resonanceKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The oscillator (with its own volume envelope) and a lowpass filter
+dsp::Oscillator osc;
+dsp::StateVariableFilter filter;
+
+// The four waveforms waveButton steps through
+const int kNumWaves = 4;
+dsp::Oscillator::Waveform gWaves[kNumWaves] = {
+	dsp::Oscillator::WAVE_SINE,
+	dsp::Oscillator::WAVE_SAW,
+	dsp::Oscillator::WAVE_SQUARE,
+	dsp::Oscillator::WAVE_TRIANGLE,
+};
+
+// The scope. It draws whatever you give it with scope.log(), one
+// value per channel, every sample.
+Scope scope;
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	playButton.Update(context);
+	waveButton.Update(context);
+
+	// Start and stop the note
+	if(playButton.JustPressed())
+		osc.NoteOn();
+	if(playButton.JustReleased())
+		osc.NoteOff();
+
+	// Count() goes up by one on every press. "% kNumWaves" wraps it
+	// back to 0 after the last one: 0, 1, 2, 3, 0, 1, ...
+	osc.SetWaveform(gWaves[waveButton.Count() % kNumWaves]);
+
+	// Pitch from 55 Hz (A1) to 880 Hz (A5). MapExponential so the knob
+	// feels even across its whole travel (see dsp/Utility.h).
+	osc.SetFreq(dsp::MapExponential(dsp::FullRange(pitchKnob.Read(context)), 55.f, 880.f));
+
+	// Cutoff from 100 Hz (very dark) to 8000 Hz (almost no filter)
+	filter.SetFreq(dsp::MapExponential(dsp::FullRange(cutoffKnob.Read(context)), 100.f, 8000.f));
+
+	// Resonance stops at 0.9 - above that the filter rings on its own
+	filter.SetResonance(dsp::MapLinear(dsp::FullRange(resonanceKnob.Read(context)), 0.f, 0.9f));
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The raw oscillator, then the same sound through the filter
+		float raw = osc.Process();
+		float filtered = filter.Process(raw);
+
+		// Draw both on the scope: raw on channel 1, filtered on
+		// channel 2. Give it exactly as many values as the channels
+		// set in setup().
+		scope.log(raw, filtered);
+
+		// Only the filtered sound goes to the left (0) and right (1)
+		// outputs, turned down by 6 dB to leave some headroom
+		float sample = dsp::ApplyGain(filtered, -6.f);
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0); // digital pin D0
+	waveButton.Init(context, 1); // digital pin D1
+	pitchKnob.Init(0);           // analog input A0
+	cutoffKnob.Init(1);          // analog input A1
+	resonanceKnob.Init(2);       // analog input A2
+
+	float sampleRate = context->audioSampleRate;
+
+	// Sustain at full volume, so the wave stays still on the scope
+	// while you hold the button
+	osc.Init(sampleRate);
+	osc.SetAmpSustain(1.f);
+	filter.Init(sampleRate);
+	filter.SetMode(dsp::StateVariableFilter::MODE_LOWPASS);
+
+	// 2 channels (raw and filtered), drawn at the audio sample rate
+	scope.setup(2, sampleRate);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}
