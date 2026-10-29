@@ -182,6 +182,7 @@ Save your own `render.cpp` somewhere first if you want to keep it.
 | [`sensor_printing`](examples/sensor_printing.cpp.txt) | Printing sensor values |
 | [`effects_chain`](examples/effects_chain.cpp.txt) | Running a sound through several effects |
 | [`voice_manager`](examples/voice_manager.cpp.txt) | Playing several notes at once |
+| [`lfo_vibrato`](examples/lfo_vibrato.cpp.txt) | An LFO moving the pitch of a tone, with all five LFO waveforms |
 
 **Bela extras**, no extra hardware needed:
 
