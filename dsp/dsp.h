@@ -9,5 +9,6 @@
 #include "Utility.h"
 #include "Board.h"
 #include "Synthesis/Synthesis.h"
+#include "Effects/Effects.h"
 #include "Filters/Filters.h"
 #include "Other/Other.h"
