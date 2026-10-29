@@ -1,0 +1,209 @@
+/** SMC26 DSP course example: modal sequencer.
+ *
+ *  An 8-step sequencer plays an example pattern on its own, through
+ *  a small pool of modal-synth voices shared via dsp::VoiceManager.
+ *  structureKnob/brightnessKnob/dampingKnob shape the voices' timbre,
+ *  tempoKnob speeds/slows the sequencer, gainKnob sets the output
+ *  level, playStopButton stops/resumes it, and resetButton jumps it
+ *  back to the first step.
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playStopButton - D0     structureKnob  - A0
+ *    resetButton    - D1     brightnessKnob - A1
+ *                            dampingKnob    - A2
+ *                            tempoKnob      - A3
+ *                            gainKnob       - A4
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playStopButton;
+Button resetButton;
+
+Potentiometer structureKnob;
+Potentiometer brightnessKnob;
+Potentiometer dampingKnob;
+Potentiometer tempoKnob;
+Potentiometer gainKnob;
+
+// true = print the sensor values in the terminal. Change to false to
+// turn printing off.
+bool gPrintValues = true;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("playStop", playStopButton.IsPressed());
+	PrintValue("reset", resetButton.IsPressed());
+	PrintValue("structure", dsp::FullRange(structureKnob.Read(context)));
+	PrintValue("brightness", dsp::FullRange(brightnessKnob.Read(context)));
+	PrintValue("damping", dsp::FullRange(dampingKnob.Read(context)));
+	PrintValue("tempo", dsp::FullRange(tempoKnob.Read(context)));
+	PrintValue("gain", dsp::FullRange(gainKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// How many notes can ring at the same time. A new note takes a free
+// voice, or cuts off the oldest one if they are all busy.
+const int kNumVoices = 2;
+
+dsp::VoiceManager<dsp::ModalVoice, kNumVoices> voices;
+
+// A free-running LFO, here used for vibrato on each voice's pitch.
+// Swap SetFreq/the depth below, or point a Process() call at any
+// other parameter instead (amplitude for tremolo, cutoff for a filter
+// wobble, ...) - see dsp/Other/Lfo.h.
+dsp::Lfo vibrato;
+const float kVibratoDepthHz = 8.f; // how far the pitch wobbles
+
+// Plays itself: an 8-step example pattern, looping at a tempo set by
+// tempoKnob. Edit gPattern below (and sequencer.SetNumSteps in setup()
+// if you change how many notes are in it) to make your own. Note names
+// instead of Hz - see dsp::NoteToFreq in dsp/Utility.h, and
+// dsp/Other/Sequencer.h.
+dsp::Sequencer sequencer;
+const char* gPattern[8] = {"A3", "C4", "D4", "E4", "G4", "E4", "D4", "C4"};
+
+// gainKnob sets the output volume, in dB, applied with dsp::ApplyGain
+const float kMinGainDb = -48.f; // gainKnob fully down
+const float kMaxGainDb = 12.f;  // gainKnob fully up
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() below sees the latest
+	// press
+	playStopButton.Update(context);
+	resetButton.Update(context);
+
+	// Knobs go from 0 to 1, which is what these settings expect
+	float structure = dsp::FullRange(structureKnob.Read(context));
+	float brightness = dsp::FullRange(brightnessKnob.Read(context));
+	float damping = dsp::FullRange(dampingKnob.Read(context));
+
+	// Give the same sound settings to every voice
+	for(int v = 0; v < kNumVoices; v++)
+	{
+		voices.Voice(v).SetStructure(structure);
+		voices.Voice(v).SetBrightness(brightness);
+		voices.Voice(v).SetDamping(damping);
+	}
+
+	// 60 - 240 BPM; see dsp/Utility.h's MapExponential for why time
+	// knobs want the exponential mapping rather than MapLinear.
+	sequencer.SetTempo(dsp::MapExponential(dsp::FullRange(tempoKnob.Read(context)), 60.f, 240.f));
+
+	// Turn gainKnob's 0 to 1 into a volume from -48 dB to +12 dB
+	float outputGainDb = dsp::MapLinear(dsp::FullRange(gainKnob.Read(context)), kMinGainDb, kMaxGainDb);
+
+	// Each press of playStopButton stops the pattern if it is playing,
+	// or starts it if it is stopped
+	if(playStopButton.JustPressed())
+	{
+		if(sequencer.IsRunning())
+			sequencer.Stop();
+		else
+			sequencer.Start();
+	}
+
+	// resetButton jumps back to the first step
+	if(resetButton.JustPressed())
+		sequencer.Reset();
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// Vibrato: move every voice's pitch a little above and below
+		// the note it is playing
+		float vibratoOffset = kVibratoDepthHz * vibrato.Process();
+		for(int v = 0; v < kNumVoices; v++)
+			voices.Voice(v).SetFreq(voices.Freq(v) + vibratoOffset);
+
+		// Process() moves the sequencer on by one sample and is true
+		// only when a new step starts. If that step isn't a rest, play
+		// its note.
+		if(sequencer.Process() && sequencer.CurrentGate())
+			voices.NoteOn(sequencer.CurrentFreq());
+
+		// Mix all the voices into one sample and set its volume
+		float sample = dsp::ApplyGain(voices.Process(), outputGainDb);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playStopButton.Init(context, 0); // digital pin D0
+	resetButton.Init(context, 1);    // digital pin D1
+	structureKnob.Init(0);           // analog input A0
+	brightnessKnob.Init(1);          // analog input A1
+	dampingKnob.Init(2);             // analog input A2
+	tempoKnob.Init(3);               // analog input A3
+	gainKnob.Init(4);                // analog input A4
+
+	float sampleRate = context->audioSampleRate;
+
+	// Set up the voices and the vibrato (5 wobbles per second) - they
+	// need to know the sample rate
+	voices.Init(sampleRate);
+	vibrato.Init(sampleRate);
+	vibrato.SetFreq(5.f);
+
+	// Set up the sequencer and load the pattern into its 8 steps
+	sequencer.Init(sampleRate);
+	sequencer.SetTempo(120.f);
+	for(int i = 0; i < 8; i++)
+		sequencer.SetStep(i, dsp::NoteToFreq(gPattern[i]));
+	sequencer.SetNumSteps(8);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

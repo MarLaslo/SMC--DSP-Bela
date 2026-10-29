@@ -1,0 +1,185 @@
+/** SMC26 DSP course example: drum sequencer.
+ *
+ *  An 8-step drum sequencer, playing kick/snare/hat on its own.
+ *  tempoKnob speeds/slows it; playStopButton stops/resumes it;
+ *  resetButton jumps it back to the first step.
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playStopButton - D0     kickDecayKnob   - A0
+ *    resetButton    - D1     hatToneKnob     - A1
+ *                            snareSnappyKnob - A2
+ *                            tempoKnob       - A3
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playStopButton;
+Button resetButton;
+
+Potentiometer kickDecayKnob;
+Potentiometer hatToneKnob;
+Potentiometer snareSnappyKnob;
+Potentiometer tempoKnob;
+
+// true = print the sensor values in the terminal. Change to false to
+// turn printing off.
+bool gPrintValues = true;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("playStop", playStopButton.IsPressed());
+	PrintValue("reset", resetButton.IsPressed());
+	PrintValue("kickDecay", dsp::FullRange(kickDecayKnob.Read(context)));
+	PrintValue("hatTone", dsp::FullRange(hatToneKnob.Read(context)));
+	PrintValue("snareSnappy", dsp::FullRange(snareSnappyKnob.Read(context)));
+	PrintValue("tempo", dsp::FullRange(tempoKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The three drums. Each one makes a single hit when you call Hit().
+dsp::SynthBassDrum kick;
+dsp::SynthSnareDrum snare;
+dsp::HiHat hat;
+
+// Which drum each step hits - Sequencer just hands back whatever
+// number you gave it via SetStep, so here we use it as a drum ID
+// instead of a frequency. See dsp/Other/Sequencer.h.
+const float kKick = 0.f;
+const float kSnare = 1.f;
+const float kHat = 2.f;
+
+// Plays itself: an 8-step pattern - Kick, Hat, Hat, Hat, Snare, Hat,
+// Hat, Hat - looping at a tempo set by tempoKnob. Edit gPattern below
+// (and sequencer.SetNumSteps in setup() if you change how many hits
+// are in it) to make your own.
+dsp::Sequencer sequencer;
+float gPattern[8] = {kKick, kHat, kHat, kHat, kSnare, kHat, kHat, kHat};
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() below sees the latest
+	// press
+	playStopButton.Update(context);
+	resetButton.Update(context);
+
+	// Knobs go from 0 to 1, which is what these settings expect
+	kick.SetDecay(dsp::FullRange(kickDecayKnob.Read(context)));
+	hat.SetTone(dsp::FullRange(hatToneKnob.Read(context)));
+	snare.SetSnappy(dsp::FullRange(snareSnappyKnob.Read(context)));
+
+	// 60 - 240 BPM; see dsp/Utility.h's MapExponential for why time
+	// knobs want the exponential mapping rather than MapLinear.
+	sequencer.SetTempo(dsp::MapExponential(dsp::FullRange(tempoKnob.Read(context)), 60.f, 240.f));
+
+	// Each press of playStopButton stops the pattern if it is playing,
+	// or starts it if it is stopped
+	if(playStopButton.JustPressed())
+	{
+		if(sequencer.IsRunning())
+			sequencer.Stop();
+		else
+			sequencer.Start();
+	}
+
+	// resetButton jumps back to the first step
+	if(resetButton.JustPressed())
+		sequencer.Reset();
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// Process() moves the sequencer on by one sample and is true
+		// only when a new step starts. If that step isn't a rest, hit
+		// the drum it holds.
+		if(sequencer.Process() && sequencer.CurrentGate())
+		{
+			float drum = sequencer.CurrentFreq();
+			if(drum == kKick)
+				kick.Hit();
+			else if(drum == kSnare)
+				snare.Hit();
+			else
+				hat.Hit();
+		}
+
+		// Mix the three drums together into one sample
+		float sample = kick.Process() + snare.Process() + hat.Process();
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playStopButton.Init(context, 0); // digital pin D0
+	resetButton.Init(context, 1);    // digital pin D1
+	kickDecayKnob.Init(0);           // analog input A0
+	hatToneKnob.Init(1);             // analog input A1
+	snareSnappyKnob.Init(2);         // analog input A2
+	tempoKnob.Init(3);               // analog input A3
+
+	// Set up the drums - they need to know the sample rate
+	float sampleRate = context->audioSampleRate;
+	kick.Init(sampleRate);
+	snare.Init(sampleRate);
+	hat.Init(sampleRate);
+
+	// Set up the sequencer and load the pattern into its 8 steps
+	sequencer.Init(sampleRate);
+	sequencer.SetTempo(120.f);
+	for(int i = 0; i < 8; i++)
+		sequencer.SetStep(i, gPattern[i]);
+	sequencer.SetNumSteps(8);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

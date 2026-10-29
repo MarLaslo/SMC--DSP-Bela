@@ -1,0 +1,229 @@
+/** SMC26 DSP course example: strummed strings (physical model).
+ *
+ *  Physical modeling makes sound by imitating how a real object
+ *  vibrates, instead of building the sound from waves. A plucked
+ *  string is the classic one (the Karplus-Strong method): a short
+ *  burst of noise - the "pluck" - goes round and round a tiny loop.
+ *  The length of the loop sets the pitch, and a little bit of the
+ *  sound is lost on every trip round, so it fades out just like a
+ *  real string. No recordings, just a loop and some noise.
+ *
+ *  Here four dsp::KarplusString strings are tuned to a chord, like a
+ *  small guitar. Press downButton to strum from the lowest string to
+ *  the highest, upButton to strum back up from the highest.
+ *
+ *  chordKnob      picks the chord (major chords, around A)
+ *  decayKnob      short, muted "plunk" up to long ringing strings
+ *  brightnessKnob dull, soft pluck up to bright, metallic pluck
+ *  materialKnob   what the string is made of: middle = plain string,
+ *                 down = buzzy, sitar-like, up = stiff, piano/bell-like
+ *  strumKnob      how spread out the strum is: all down = all strings
+ *                 at once, up = a slow, harp-like strum
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    downButton - D0     chordKnob      - A0
+ *    upButton   - D1     decayKnob      - A1
+ *                        brightnessKnob - A2
+ *                        materialKnob   - A3
+ *                        strumKnob      - A4
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include <cmath>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button downButton;
+Button upButton;
+
+Potentiometer chordKnob;
+Potentiometer decayKnob;
+Potentiometer brightnessKnob;
+Potentiometer materialKnob;
+Potentiometer strumKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("down", downButton.IsPressed());
+	PrintValue("up", upButton.IsPressed());
+	PrintValue("chord", dsp::FullRange(chordKnob.Read(context)));
+	PrintValue("decay", dsp::FullRange(decayKnob.Read(context)));
+	PrintValue("brightness", dsp::FullRange(brightnessKnob.Read(context)));
+	PrintValue("material", dsp::FullRange(materialKnob.Read(context)));
+	PrintValue("strum", dsp::FullRange(strumKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// Four strings. An array holds several objects of the same kind:
+// strings[0] is the lowest string, strings[3] the highest.
+const int kNumStrings = 4;
+dsp::KarplusString strings[kNumStrings];
+
+// How many semitones above the chord's root note each string is
+// tuned: root, fifth, octave, and the third an octave up. Spread out
+// like this it sounds like a real guitar chord.
+float gStringSemitones[kNumStrings] = {0.f, 7.f, 12.f, 16.f};
+
+// Catches the loudest moments - all four strings at once - and turns
+// them down smoothly, so the output never distorts
+dsp::Limiter limiter;
+
+// The chord chordKnob is centered on
+float gRootNote = dsp::NoteToFreq("A2");
+
+// For strumming: a strum plucks the strings one at a time, with a
+// short wait between them. gStrumStep counts how many strings this
+// strum has plucked so far - once it reaches kNumStrings, the strum is
+// finished. It starts there, so nothing plays at power-on.
+int gStrumStep = kNumStrings;
+bool gStrumDown = true;          // true = low to high, false = high to low
+uint64_t gLastPluckFrame = 0;    // when the last string was plucked, in samples
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() below sees the latest
+	// press
+	downButton.Update(context);
+	upButton.Update(context);
+
+	// Chord: the root snaps to semitones, up to 7 either way of A2 (E2
+	// to E3). Then each string is tuned gStringSemitones above it -
+	// every semitone up multiplies the pitch by 2^(1/12).
+	float root = dsp::MapSemitones(dsp::FullRange(chordKnob.Read(context)), gRootNote, 7.f);
+	for(int s = 0; s < kNumStrings; s++)
+		strings[s].SetFreq(root * powf(2.f, gStringSemitones[s] / 12.f));
+
+	// Decay stops at 0.9 - from 0.95 up the string never stops
+	// ringing. Brightness is already 0 - 1, same as the knob. Material
+	// goes from -1 (buzzy) through 0 (plain) to 1 (stiff).
+	float decay = dsp::MapLinear(dsp::FullRange(decayKnob.Read(context)), 0.2f, 0.9f);
+	float brightness = dsp::FullRange(brightnessKnob.Read(context));
+	float material = dsp::MapLinear(dsp::FullRange(materialKnob.Read(context)), -1.f, 1.f);
+	for(int s = 0; s < kNumStrings; s++)
+	{
+		strings[s].SetDamping(decay);
+		strings[s].SetBrightness(brightness);
+		strings[s].SetNonLinearity(material);
+	}
+
+	// A button press starts a new strum: back to the first string, in
+	// that button's direction
+	if(downButton.JustPressed())
+	{
+		gStrumStep = 0;
+		gStrumDown = true;
+	}
+	if(upButton.JustPressed())
+	{
+		gStrumStep = 0;
+		gStrumDown = false;
+	}
+
+	// Wait between strings: 0 ms (all at once) up to 80 ms, turned
+	// into samples (44100 samples = 1 second)
+	float strumGapMs = dsp::MapLinear(dsp::FullRange(strumKnob.Read(context)), 0.f, 80.f);
+	uint64_t strumGapFrames = strumGapMs * 0.001f * context->audioSampleRate;
+
+	// While a strum is going, pluck the next string once enough time
+	// has passed since the last one. context->audioFramesElapsed is
+	// how many samples the board has played since it started - Bela's
+	// clock.
+	uint64_t now = context->audioFramesElapsed;
+	if(gStrumStep < kNumStrings && now - gLastPluckFrame >= strumGapFrames)
+	{
+		// Down: strings 0, 1, 2, 3. Up: strings 3, 2, 1, 0.
+		int s;
+		if(gStrumDown)
+			s = gStrumStep;
+		else
+			s = kNumStrings - 1 - gStrumStep;
+
+		strings[s].Pluck();
+		gStrumStep++;
+		gLastPluckFrame = now;
+	}
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// Add all four strings together
+		float sample = 0.f;
+		for(int s = 0; s < kNumStrings; s++)
+			sample += strings[s].Process();
+
+		// Four strings added up get loud, so turn the mix down by
+		// 12 dB, then the limiter catches anything left over
+		sample = limiter.Process(dsp::ApplyGain(sample, -12.f));
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	downButton.Init(context, 0); // digital pin D0
+	upButton.Init(context, 1);   // digital pin D1
+	chordKnob.Init(0);           // analog input A0
+	decayKnob.Init(1);           // analog input A1
+	brightnessKnob.Init(2);      // analog input A2
+	materialKnob.Init(3);        // analog input A3
+	strumKnob.Init(4);           // analog input A4
+
+	// Every string needs to know the sample rate
+	for(int s = 0; s < kNumStrings; s++)
+		strings[s].Init(context->audioSampleRate);
+	limiter.Init();
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

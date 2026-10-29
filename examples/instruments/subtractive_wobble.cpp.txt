@@ -1,0 +1,214 @@
+/** SMC26 DSP course example: subtractive synth with a wobble.
+ *
+ *  Subtractive synthesis starts with a raw, buzzy waveform full of
+ *  harmonics, then "subtracts" some of them with a filter - like
+ *  carving a shape out of a block of wood. It's the sound of most
+ *  classic analog synths. dsp::Subtractive does it all in one voice:
+ *  waveform -> lowpass filter -> volume envelope.
+ *
+ *  On top of that, an LFO (a slow, silent wave) moves the filter's
+ *  cutoff up and down for you, giving the "wah-wah" / dubstep
+ *  "wobble" sound.
+ *
+ *  Hold playButton to play a note. Press waveButton to step through
+ *  the three raw waveforms - listen to how each one sounds through
+ *  the filter:
+ *    1. saw      - bright and buzzy, every harmonic (strings, brass)
+ *    2. square   - hollow, odd harmonics only (clarinet, retro games)
+ *    3. triangle - soft, very few harmonics (flute-like)
+ *
+ *  pitchKnob       picks the note (A minor scale, one octave up/down)
+ *  cutoffKnob      the filter: low = dark and muffled, high = bright
+ *  resonanceKnob   makes the filter "sing" around the cutoff
+ *  wobbleRateKnob  how fast the LFO moves the cutoff (slow to fast)
+ *  wobbleDepthKnob how far it moves it. All the way down = no wobble
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton - D0     pitchKnob       - A0
+ *    waveButton - D1     cutoffKnob      - A1
+ *                        resonanceKnob   - A2
+ *                        wobbleRateKnob  - A3
+ *                        wobbleDepthKnob - A4
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include <cmath>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playButton;
+Button waveButton;
+
+Potentiometer pitchKnob;
+Potentiometer cutoffKnob;
+Potentiometer resonanceKnob;
+Potentiometer wobbleRateKnob;
+Potentiometer wobbleDepthKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", playButton.IsPressed());
+	PrintValue("wave", waveButton.Count());
+	PrintValue("pitch", dsp::FullRange(pitchKnob.Read(context)));
+	PrintValue("cutoff", dsp::FullRange(cutoffKnob.Read(context)));
+	PrintValue("resonance", dsp::FullRange(resonanceKnob.Read(context)));
+	PrintValue("wobbleRate", dsp::FullRange(wobbleRateKnob.Read(context)));
+	PrintValue("wobbleDepth", dsp::FullRange(wobbleDepthKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The subtractive voice: waveform -> filter -> volume envelope
+dsp::Subtractive synth;
+
+// The LFO that wobbles the filter cutoff. It makes no sound itself -
+// it just moves between -1 and 1, slowly, over and over.
+dsp::Lfo wobble;
+
+// The three waveforms waveButton steps through (see the top of the
+// file)
+const int kNumWaves = 3;
+dsp::Subtractive::Waveform gWaves[kNumWaves] = {
+	dsp::Subtractive::WAVE_SAW,
+	dsp::Subtractive::WAVE_SQUARE,
+	dsp::Subtractive::WAVE_TRIANGLE,
+};
+
+// The note pitchKnob is centered on
+float gRootNote = dsp::NoteToFreq("A2");
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	playButton.Update(context);
+	waveButton.Update(context);
+
+	// Start and stop the note
+	if(playButton.JustPressed())
+		synth.NoteOn();
+	if(playButton.JustReleased())
+		synth.NoteOff();
+
+	// Count() goes up by one on every press. "% kNumWaves" wraps it
+	// back to 0 after the last one: 0, 1, 2, 0, 1, ...
+	synth.SetWaveform(gWaves[waveButton.Count() % kNumWaves]);
+
+	// Pitch: snaps to the notes of A minor, an octave either way
+	synth.SetFreq(dsp::MapSemitones(dsp::FullRange(pitchKnob.Read(context)), gRootNote, 12.f, dsp::SCALE_MINOR));
+
+	// Cutoff: MapExponential so the knob feels even across its whole
+	// travel (see dsp/Utility.h). This is the cutoff with no wobble.
+	float baseCutoff = dsp::MapExponential(dsp::FullRange(cutoffKnob.Read(context)), 80.f, 5000.f);
+
+	// Resonance stops at 0.9 - from about 1 upward the filter whistles
+	// on its own, even when no note is playing
+	synth.SetResonance(dsp::MapLinear(dsp::FullRange(resonanceKnob.Read(context)), 0.f, 0.9f));
+
+	// Wobble speed: from one wobble every 5 seconds (0.2 Hz) up to 10
+	// wobbles a second
+	wobble.SetFreq(dsp::MapExponential(dsp::FullRange(wobbleRateKnob.Read(context)), 0.2f, 10.f));
+
+	// Wobble depth: from 0 (no wobble) to 3 octaves either way
+	float wobbleDepth = dsp::MapLinear(dsp::FullRange(wobbleDepthKnob.Read(context)), 0.f, 3.f);
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The LFO runs here, once per sample like the sound, so the
+		// wobble is perfectly smooth. Its value goes from -1 to 1.
+		float lfoValue = wobble.Process();
+
+		// Move the cutoff up and down by "wobbleDepth" octaves. Each
+		// octave doubles the frequency, so: base * 2^(depth * lfo).
+		// Clamp keeps it inside the range the filter can handle.
+		float cutoff = baseCutoff * powf(2.f, wobbleDepth * lfoValue);
+		synth.SetCutoff(dsp::Clamp(cutoff, 30.f, 10000.f));
+
+		// The next sample of the synth, turned down by 6 dB to leave
+		// some headroom (see dsp::ApplyGain in dsp/Utility.h)
+		float sample = dsp::ApplyGain(synth.Process(), -6.f);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0); // digital pin D0
+	waveButton.Init(context, 1); // digital pin D1
+	pitchKnob.Init(0);           // analog input A0
+	cutoffKnob.Init(1);          // analog input A1
+	resonanceKnob.Init(2);       // analog input A2
+	wobbleRateKnob.Init(3);      // analog input A3
+	wobbleDepthKnob.Init(4);     // analog input A4
+
+	float sampleRate = context->audioSampleRate;
+
+	// The synth has its own filter envelope built in: on every note it
+	// pushes the cutoff up by SetFilterEnvAmount Hz, then lets it fall
+	// back over SetFilterDecay seconds. That gives each note a bright
+	// "pluck" at the start. Set the amount to 0 to turn it off.
+	synth.Init(sampleRate);
+	synth.SetFilterEnvAmount(1500.f);
+	synth.SetFilterDecay(0.25f);
+	synth.SetAmpRelease(0.2f);
+
+	// A sine LFO glides smoothly up and down. Try Lfo::WAVE_SQUARE for
+	// a choppy on/off wobble, or Lfo::WAVE_SAW for a "wub" that jumps
+	// up and slides down.
+	wobble.Init(sampleRate);
+	wobble.SetWaveform(dsp::Lfo::WAVE_SINE);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

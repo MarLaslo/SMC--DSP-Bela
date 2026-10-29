@@ -1,0 +1,222 @@
+/** SMC26 DSP course example: FM synth with a filter envelope.
+ *
+ *  An FM (frequency modulation) voice played through a resonant
+ *  ladder filter. The filter has its own ADSR envelope: every time
+ *  you press the button, the cutoff jumps up and then falls back
+ *  down, giving the "squelchy" / "plucky" sound of classic synths.
+ *
+ *  Hold playButton to play a note. Press ratioButton to step through
+ *  four FM sounds - each press picks the next one, then wraps around:
+ *    1. ratio 1    - warm and round, like a soft brass
+ *    2. ratio 2    - hollow, a bit like a clarinet
+ *    3. ratio 3.5  - bell / metallic
+ *    4. ratio 0.5  - deep, growly bass
+ *
+ *  pitchKnob     picks the note (A minor scale, one octave up/down)
+ *  fmKnob        how much FM - from a clean sine to a buzzy, bright tone
+ *  cutoffKnob    where the filter sits when the envelope is at rest
+ *  envAmountKnob how far the envelope opens the filter on each note
+ *  resonanceKnob makes the filter "ring" / whistle around the cutoff
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton  - D0     pitchKnob     - A0
+ *    ratioButton - D1     fmKnob        - A1
+ *                         cutoffKnob    - A2
+ *                         envAmountKnob - A3
+ *                         resonanceKnob - A4
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include <cmath>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playButton;
+Button ratioButton;
+
+Potentiometer pitchKnob;
+Potentiometer fmKnob;
+Potentiometer cutoffKnob;
+Potentiometer envAmountKnob;
+Potentiometer resonanceKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", playButton.IsPressed());
+	PrintValue("ratio", ratioButton.Count());
+	PrintValue("pitch", dsp::FullRange(pitchKnob.Read(context)));
+	PrintValue("fm", dsp::FullRange(fmKnob.Read(context)));
+	PrintValue("cutoff", dsp::FullRange(cutoffKnob.Read(context)));
+	PrintValue("envAmount", dsp::FullRange(envAmountKnob.Read(context)));
+	PrintValue("resonance", dsp::FullRange(resonanceKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The FM voice: makes the raw sound
+dsp::FM fm;
+
+// The filter: removes high frequencies above its cutoff
+dsp::LadderFilter filter;
+
+// A second envelope, just for the filter. It moves the cutoff up and
+// down over the note, separately from the volume.
+dsp::Adsr filterEnv;
+
+// The four FM sounds ratioButton steps through (see the top of the
+// file). The ratio is the modulator's pitch compared to the note.
+const int kNumRatios = 4;
+float gRatios[kNumRatios] = {1.f, 2.f, 3.5f, 0.5f};
+
+// The note pitchKnob is centered on
+float gRootNote = dsp::NoteToFreq("A2");
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	playButton.Update(context);
+	ratioButton.Update(context);
+
+	// Start and stop the note - both envelopes together, so the volume
+	// and the filter move at the same time
+	if(playButton.JustPressed())
+	{
+		fm.NoteOn();
+		filterEnv.NoteOn();
+	}
+	if(playButton.JustReleased())
+	{
+		fm.NoteOff();
+		filterEnv.NoteOff();
+	}
+
+	// Count() goes up by one on every press. "% kNumRatios" wraps it
+	// back to 0 after the last one: 0, 1, 2, 3, 0, 1, ...
+	fm.SetModRatio(gRatios[ratioButton.Count() % kNumRatios]);
+
+	// Pitch: snaps to the notes of A minor, an octave either way
+	fm.SetFreq(dsp::MapSemitones(dsp::FullRange(pitchKnob.Read(context)), gRootNote, 12.f, dsp::SCALE_MINOR));
+
+	// FM depth: 0 = pure sine, 4 = bright and buzzy
+	fm.SetModDepth(dsp::MapLinear(dsp::FullRange(fmKnob.Read(context)), 0.f, 4.f));
+
+	// Filter: MapExponential so the knob feels even across its whole
+	// travel (see dsp/Utility.h).
+	// baseCutoff: Hz, where the filter sits when the envelope is at 0.
+	// envAmount: how many octaves the envelope opens it.
+	float baseCutoff = dsp::MapExponential(dsp::FullRange(cutoffKnob.Read(context)), 60.f, 2000.f);
+	float envAmount = dsp::MapLinear(dsp::FullRange(envAmountKnob.Read(context)), 0.f, 4.f);
+
+	// Resonance stops just below 1 - from 1 upward the filter whistles
+	// on its own, even after the note has ended
+	filter.SetResonance(dsp::MapLinear(dsp::FullRange(resonanceKnob.Read(context)), 0.f, 0.95f));
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// Where the filter envelope is right now, 0 - 1
+		float env = filterEnv.Process();
+
+		// Each octave doubles the frequency, so "envAmount octaves
+		// above baseCutoff" is baseCutoff * 2^(envAmount * env).
+		// Clamp keeps the filter from ever opening all the way - the
+		// top few kHz of FM are where the harshness lives.
+		float cutoff = baseCutoff * powf(2.f, envAmount * env);
+		filter.SetFreq(dsp::Clamp(cutoff, 20.f, 8000.f));
+
+		// FM voice -> filter -> a bit quieter to leave some headroom
+		float sample = filter.Process(fm.Process()) * 0.7f;
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0);  // digital pin D0
+	ratioButton.Init(context, 1); // digital pin D1
+	pitchKnob.Init(0);            // analog input A0
+	fmKnob.Init(1);               // analog input A1
+	cutoffKnob.Init(2);           // analog input A2
+	envAmountKnob.Init(3);        // analog input A3
+	resonanceKnob.Init(4);        // analog input A4
+
+	float sampleRate = context->audioSampleRate;
+
+	// The FM voice has a volume envelope and a modulation envelope
+	// built in. A short modulation decay makes each note start bright
+	// and then mellow out - try changing these times.
+	fm.Init(sampleRate);
+	fm.SetAmpAttack(0.01f);
+	fm.SetAmpDecay(0.4f);
+	fm.SetAmpSustain(0.7f);
+	fm.SetAmpRelease(0.4f);
+	fm.SetModDecay(0.4f);
+	fm.SetModSustain(0.25f);
+
+	// 24 dB/oct lowpass - the classic Moog-style filter
+	filter.Init(sampleRate);
+	filter.SetMode(dsp::LadderFilter::MODE_LOWPASS_24);
+
+	// Fast attack, medium decay, low sustain: the cutoff snaps open at
+	// the start of the note, then falls most of the way back. Make the
+	// decay shorter (e.g. 0.1) for a snappier pluck.
+	filterEnv.Init(sampleRate);
+	filterEnv.SetAttack(0.01f);
+	filterEnv.SetDecay(0.35f);
+	filterEnv.SetSustain(0.2f);
+	filterEnv.SetRelease(0.4f);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

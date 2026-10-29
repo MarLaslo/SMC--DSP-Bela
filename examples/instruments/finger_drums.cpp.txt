@@ -1,0 +1,158 @@
+/** SMC26 DSP course example: finger drums.
+ *
+ *  A small drum kit you play with your fingers. The two buttons are
+ *  drum pads - kick and snare. Both drums are made from scratch (no
+ *  recordings): sines, noise and envelopes.
+ *
+ *  kickButton  hits the kick drum
+ *  snareButton hits the snare drum
+ *
+ *  kickPitchKnob   low and boomy, up to tight and punchy
+ *  kickDecayKnob   short thud, up to a long 808-style boom
+ *  snareSnappyKnob 0 = mostly drum "tone", 1 = mostly noise "snap"
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    kickButton  - D0     kickPitchKnob   - A0
+ *    snareButton - D1     kickDecayKnob   - A1
+ *                         snareSnappyKnob - A2
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button kickButton;
+Button snareButton;
+
+Potentiometer kickPitchKnob;
+Potentiometer kickDecayKnob;
+Potentiometer snareSnappyKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("kick", kickButton.IsPressed());
+	PrintValue("snare", snareButton.IsPressed());
+	PrintValue("kickPitch", dsp::FullRange(kickPitchKnob.Read(context)));
+	PrintValue("kickDecay", dsp::FullRange(kickDecayKnob.Read(context)));
+	PrintValue("snareSnappy", dsp::FullRange(snareSnappyKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The two drums
+dsp::SynthBassDrum kick;
+dsp::SynthSnareDrum snare;
+
+// Catches the loudest moments - like both drums hit at once - and
+// turns them down smoothly, so the output never distorts
+dsp::Limiter limiter;
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() below sees the latest
+	// press
+	kickButton.Update(context);
+	snareButton.Update(context);
+
+	// The pads: a drum only needs to be hit - it fades out by itself,
+	// so there is nothing to do when the button comes up
+	if(kickButton.JustPressed())
+		kick.Hit();
+	if(snareButton.JustPressed())
+		snare.Hit();
+
+	// Kick: pitch from 40 to 90 Hz (MapExponential so the knob feels
+	// even, see dsp/Utility.h). Decay is already 0 - 1.
+	kick.SetFreq(dsp::MapExponential(dsp::FullRange(kickPitchKnob.Read(context)), 40.f, 90.f));
+	kick.SetDecay(dsp::FullRange(kickDecayKnob.Read(context)));
+
+	// Snappy is 0 - 1, same as the knob, so it can go straight in
+	snare.SetSnappy(dsp::FullRange(snareSnappyKnob.Read(context)));
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// Mix the drums: add them together, each at its own volume.
+		// 0 dB = as loud as it comes, more negative = quieter.
+		float sample = dsp::ApplyGain(kick.Process(), -3.f)
+		               + dsp::ApplyGain(snare.Process(), -6.f);
+
+		// Safety net on the final mix
+		sample = limiter.Process(sample);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	kickButton.Init(context, 0);  // digital pin D0
+	snareButton.Init(context, 1); // digital pin D1
+	kickPitchKnob.Init(0);        // analog input A0
+	kickDecayKnob.Init(1);        // analog input A1
+	snareSnappyKnob.Init(2);      // analog input A2
+
+	// Every drum needs to know the sample rate
+	float sampleRate = context->audioSampleRate;
+	kick.Init(sampleRate);
+	snare.Init(sampleRate);
+	limiter.Init();
+
+	// Settings no knob changes - try your own values here
+	kick.SetAccent(0.8f);    // how hard each kick hits, 0 - 1
+	kick.SetDirtiness(0.2f); // a little grit on the kick, 0 - 1
+	snare.SetFreq(200.f);    // pitch of the snare's drum tone, Hz
+	snare.SetAccent(0.8f);   // how hard each snare hits, 0 - 1
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

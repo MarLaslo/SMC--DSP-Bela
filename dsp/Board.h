@@ -79,6 +79,16 @@ inline void PrintValue(const char* name, float value)
     rt_printf("%s: %.3f   ", name, value);
 }
 
+// For whole numbers, e.g. a button's Count()
+inline void PrintValue(const char* name, int value)
+{
+    rt_printf("%s: %d   ", name, value);
+}
+inline void PrintValue(const char* name, unsigned int value)
+{
+    rt_printf("%s: %u   ", name, value);
+}
+
 inline void PrintLineEnd()
 {
     rt_printf("\n");

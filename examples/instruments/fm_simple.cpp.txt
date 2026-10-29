@@ -1,0 +1,181 @@
+/** SMC26 DSP course example: simple FM synth.
+ *
+ *  FM (frequency modulation) makes rich, bright sounds from just two
+ *  sine waves: a "modulator" wobbles the pitch of a "carrier" so fast
+ *  that you no longer hear a wobble - you hear a new tone instead.
+ *  dsp::FMSimple does this with only a few settings to learn.
+ *
+ *  Hold playButton to play a note. Press modeButton to switch between
+ *  two playing styles (each press flips it):
+ *    - pluck: the note fades out on its own, even while held
+ *    - pad:   the note holds as long as the button is down
+ *
+ *  pitchKnob      picks the note (C major scale, one octave up/down)
+ *  ratioKnob      the modulator's pitch compared to the note. Whole
+ *                 numbers (1, 2, 3, ...) sound musical; values in
+ *                 between sound metallic, like bells
+ *  depthKnob      how much FM - from a pure sine to a bright, buzzy tone
+ *  brightnessKnob 0 = the tone stays the same for the whole note,
+ *                 1 = bright at the start, then mellows out
+ *  lengthKnob     how long the note takes to fade, short to long
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton - D0     pitchKnob      - A0
+ *    modeButton - D1     ratioKnob      - A1
+ *                        depthKnob      - A2
+ *                        brightnessKnob - A3
+ *                        lengthKnob     - A4
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playButton;
+Button modeButton;
+
+Potentiometer pitchKnob;
+Potentiometer ratioKnob;
+Potentiometer depthKnob;
+Potentiometer brightnessKnob;
+Potentiometer lengthKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", playButton.IsPressed());
+	PrintValue("pad", modeButton.Toggled());
+	PrintValue("pitch", dsp::FullRange(pitchKnob.Read(context)));
+	PrintValue("ratio", dsp::FullRange(ratioKnob.Read(context)));
+	PrintValue("depth", dsp::FullRange(depthKnob.Read(context)));
+	PrintValue("brightness", dsp::FullRange(brightnessKnob.Read(context)));
+	PrintValue("length", dsp::FullRange(lengthKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The FM voice. It has one envelope built in, which shapes both the
+// volume and (with SetBrightness) the tone.
+dsp::FMSimple fm;
+
+// The note pitchKnob is centered on
+float gRootNote = dsp::NoteToFreq("C3");
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	playButton.Update(context);
+	modeButton.Update(context);
+
+	// Start and stop the note
+	if(playButton.JustPressed())
+		fm.NoteOn();
+	if(playButton.JustReleased())
+		fm.NoteOff();
+
+	// Toggled() flips between false and true on every press. Sustain
+	// is the level the note holds at while the button is down: 0 means
+	// it fades away (pluck), 0.8 means it stays (pad).
+	if(modeButton.Toggled())
+		fm.SetSustain(0.8f);
+	else
+		fm.SetSustain(0.f);
+
+	// Pitch: snaps to the notes of C major, an octave either way
+	fm.SetFreq(dsp::MapSemitones(dsp::FullRange(pitchKnob.Read(context)), gRootNote, 12.f, dsp::SCALE_MAJOR));
+
+	// Ratio from 0.5 (an octave below the note) to 6
+	fm.SetModRatio(dsp::MapLinear(dsp::FullRange(ratioKnob.Read(context)), 0.5f, 6.f));
+
+	// FM depth: 0 = pure sine, 4 = bright and buzzy
+	fm.SetModDepth(dsp::MapLinear(dsp::FullRange(depthKnob.Read(context)), 0.f, 4.f));
+
+	// Brightness is already 0 - 1, same as the knob
+	fm.SetBrightness(dsp::FullRange(brightnessKnob.Read(context)));
+
+	// Length: how long the note fades, from 0.1 to 3 seconds. Decay is
+	// the fade while held (pluck mode), release is the fade after
+	// letting go. MapExponential so short times get as much of the
+	// knob as long ones (see dsp/Utility.h).
+	float length = dsp::MapExponential(dsp::FullRange(lengthKnob.Read(context)), 0.1f, 3.f);
+	fm.SetDecay(length);
+	fm.SetRelease(length);
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The next sample of the FM voice, a bit quieter to leave
+		// some headroom
+		float sample = fm.Process() * 0.7f;
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0); // digital pin D0
+	modeButton.Init(context, 1); // digital pin D1
+	pitchKnob.Init(0);           // analog input A0
+	ratioKnob.Init(1);           // analog input A1
+	depthKnob.Init(2);           // analog input A2
+	brightnessKnob.Init(3);      // analog input A3
+	lengthKnob.Init(4);          // analog input A4
+
+	// The FM voice needs to know the sample rate. A 10 ms attack
+	// starts each note quickly without a click.
+	fm.Init(context->audioSampleRate);
+	fm.SetAttack(0.01f);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

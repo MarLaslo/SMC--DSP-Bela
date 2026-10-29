@@ -1,0 +1,198 @@
+/** SMC26 DSP course example: additive synth.
+ *
+ *  Additive synthesis builds a sound by adding sine waves together.
+ *  Every sound you hear is really a stack of sines (called partials
+ *  or harmonics) at different pitches and volumes - here you build
+ *  that stack by hand. dsp::Additive holds up to 16 of them.
+ *
+ *  Hold playButton to play a note. Press oddButton to switch between
+ *  two kinds of stack (each press flips it):
+ *    - all harmonics (1, 2, 3, 4, ... x the note): bright, buzzy,
+ *      like a sawtooth wave or a bowed string
+ *    - odd harmonics only (1, 3, 5, 7, ... x the note): hollow,
+ *      like a square wave or a clarinet
+ *
+ *  pitchKnob     picks the note (A minor scale, one octave up/down)
+ *  harmonicsKnob how many sines are stacked, 1 to 16. Turn it slowly
+ *                from 0 and listen to each one join in
+ *  rolloffKnob   how quickly the higher sines get quieter - low is
+ *                dark and soft, high is bright
+ *  stretchKnob   pulls the higher sines out of tune with each other.
+ *                At 0 the stack sounds like one note; turn it up for
+ *                piano, bell and gong sounds
+ *  releaseKnob   how long the note rings after you let go
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton - D0     pitchKnob     - A0
+ *    oddButton  - D1     harmonicsKnob - A1
+ *                        rolloffKnob   - A2
+ *                        stretchKnob   - A3
+ *                        releaseKnob   - A4
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include <cmath>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playButton;
+Button oddButton;
+
+Potentiometer pitchKnob;
+Potentiometer harmonicsKnob;
+Potentiometer rolloffKnob;
+Potentiometer stretchKnob;
+Potentiometer releaseKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", playButton.IsPressed());
+	PrintValue("odd", oddButton.Toggled());
+	PrintValue("pitch", dsp::FullRange(pitchKnob.Read(context)));
+	PrintValue("harmonics", dsp::FullRange(harmonicsKnob.Read(context)));
+	PrintValue("rolloff", dsp::FullRange(rolloffKnob.Read(context)));
+	PrintValue("stretch", dsp::FullRange(stretchKnob.Read(context)));
+	PrintValue("release", dsp::FullRange(releaseKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The additive voice: a stack of up to 16 sine waves with a volume
+// envelope built in
+dsp::Additive additive;
+
+// The note pitchKnob is centered on
+float gRootNote = dsp::NoteToFreq("A2");
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	playButton.Update(context);
+	oddButton.Update(context);
+
+	// Start and stop the note
+	if(playButton.JustPressed())
+		additive.NoteOn();
+	if(playButton.JustReleased())
+		additive.NoteOff();
+
+	// Pitch: snaps to the notes of A minor, an octave either way
+	additive.SetFreq(dsp::MapSemitones(dsp::FullRange(pitchKnob.Read(context)), gRootNote, 12.f, dsp::SCALE_MINOR));
+
+	// How many sines: roundf() turns the knob into a whole number,
+	// since you can't have half a sine
+	additive.SetNumHarmonics(roundf(dsp::MapLinear(dsp::FullRange(harmonicsKnob.Read(context)), 1.f, 16.f)));
+
+	// Rolloff: each sine is this much quieter than the one below it.
+	// 0.3 = each one less than a third as loud (dark), 0.95 = nearly
+	// as loud as the one below (bright)
+	additive.SetRolloff(dsp::MapLinear(dsp::FullRange(rolloffKnob.Read(context)), 0.3f, 0.95f));
+
+	// Stretch: 1 = perfectly in tune, 1.3 = higher sines pushed sharp,
+	// the further up the stack the more
+	float stretch = dsp::MapLinear(dsp::FullRange(stretchKnob.Read(context)), 1.f, 1.3f);
+
+	// Work out the pitch of every sine in the stack, as a ratio of the
+	// note: ratio 1 is the note itself, 2 is an octave up, 3 an octave
+	// and a fifth up, and so on. "h" counts the sines from 0, so h + 1
+	// is the harmonic number.
+	for(int h = 0; h < dsp::Additive::kMaxHarmonics; h++)
+	{
+		// All harmonics: 1, 2, 3, 4, ...  Odd only: 1, 3, 5, 7, ...
+		float harmonic;
+		if(oddButton.Toggled())
+			harmonic = 2.f * h + 1.f;
+		else
+			harmonic = h + 1.f;
+
+		// powf(harmonic, stretch) leaves the note itself (1) alone,
+		// and pushes higher harmonics further sharp
+		additive.SetHarmonicRatio(h, powf(harmonic, stretch));
+	}
+
+	// Release: from 0.05 to 3 seconds. MapExponential so short times
+	// get as much of the knob as long ones (see dsp/Utility.h).
+	additive.SetAmpRelease(dsp::MapExponential(dsp::FullRange(releaseKnob.Read(context)), 0.05f, 3.f));
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The next sample of the whole stack, turned down by 12 dB.
+		// Change -12 to set the volume: closer to 0 is louder, more
+		// negative is quieter (see dsp::ApplyGain in dsp/Utility.h).
+		float sample = dsp::ApplyGain(additive.Process(), -12.f);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0); // digital pin D0
+	oddButton.Init(context, 1);  // digital pin D1
+	pitchKnob.Init(0);           // analog input A0
+	harmonicsKnob.Init(1);       // analog input A1
+	rolloffKnob.Init(2);         // analog input A2
+	stretchKnob.Init(3);         // analog input A3
+	releaseKnob.Init(4);         // analog input A4
+
+	// The additive voice needs to know the sample rate. The envelope
+	// starts quickly, dips a little, then holds while you play.
+	additive.Init(context->audioSampleRate);
+	additive.SetAmpAttack(0.01f);
+	additive.SetAmpDecay(0.5f);
+	additive.SetAmpSustain(0.6f);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

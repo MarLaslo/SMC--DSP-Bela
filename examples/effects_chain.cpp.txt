@@ -1,0 +1,237 @@
+/** SMC26 DSP course example: effects chain.
+ *
+ *  How to use effects. A simple plucked synth note goes through three
+ *  effects, one after the other, like guitar pedals on a cable:
+ *
+ *    synth -> overdrive -> chorus -> delay -> output
+ *
+ *  Every effect works the same way: give it a sample with Process(),
+ *  and it gives you back the changed sample. Pass that on to the next
+ *  effect, and so on. Swap any of them for another effect from
+ *  dsp/Effects/ (Tremolo, Flanger, Phaser, WaveFolder, Reverb, ...) -
+ *  the chain stays the same.
+ *
+ *  Press playButton to play the next note of a short melody (A, C, E,
+ *  G, then round again). Press bypassButton to switch all effects off
+ *  and on (each press flips it) to hear the difference.
+ *
+ *  driveKnob      overdrive: from nearly clean up to fuzzy and loud
+ *  chorusKnob     how much chorus is mixed in. All the way down = off
+ *  delayTimeKnob  time between echoes, 50 ms (slapback) to 800 ms
+ *  feedbackKnob   how many echoes: one, up to a long trail
+ *  delayMixKnob   how loud the echoes are. All the way down = off
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton   - D0     driveKnob     - A0
+ *    bypassButton - D1     chorusKnob    - A1
+ *                          delayTimeKnob - A2
+ *                          feedbackKnob  - A3
+ *                          delayMixKnob  - A4
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playButton;
+Button bypassButton;
+
+Potentiometer driveKnob;
+Potentiometer chorusKnob;
+Potentiometer delayTimeKnob;
+Potentiometer feedbackKnob;
+Potentiometer delayMixKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", playButton.IsPressed());
+	PrintValue("bypass", bypassButton.Toggled());
+	PrintValue("drive", dsp::FullRange(driveKnob.Read(context)));
+	PrintValue("chorus", dsp::FullRange(chorusKnob.Read(context)));
+	PrintValue("delayTime", dsp::FullRange(delayTimeKnob.Read(context)));
+	PrintValue("feedback", dsp::FullRange(feedbackKnob.Read(context)));
+	PrintValue("delayMix", dsp::FullRange(delayMixKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The sound going into the effects: a short, plucked synth note
+dsp::Subtractive synth;
+
+// The effects, in the order the sound goes through them
+dsp::Overdrive drive;
+dsp::Chorus chorus;
+dsp::Delay delay;
+
+// The melody playButton steps through - note names instead of Hz,
+// see dsp::NoteToFreq in dsp/Utility.h
+const int kNumNotes = 4;
+float gNotes[kNumNotes] = {
+	dsp::NoteToFreq("A2"),
+	dsp::NoteToFreq("C3"),
+	dsp::NoteToFreq("E3"),
+	dsp::NoteToFreq("G3"),
+};
+
+// Which note of the melody plays next
+int gNoteIndex = 0;
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	playButton.Update(context);
+	bypassButton.Update(context);
+
+	// Each press plays the next note, then moves on. "% kNumNotes"
+	// wraps back to the first note after the last: 0, 1, 2, 3, 0, ...
+	if(playButton.JustPressed())
+	{
+		synth.SetFreq(gNotes[gNoteIndex]);
+		synth.NoteOn();
+		gNoteIndex = (gNoteIndex + 1) % kNumNotes;
+	}
+	if(playButton.JustReleased())
+		synth.NoteOff();
+
+	// Toggled() flips on every press: starts false, so the effects
+	// start on
+	bool effectsOn = !bypassButton.Toggled();
+
+	// Drive: only 0.25 - 0.6 is useful. 0 would be silent, and above
+	// 0.6 it's extreme (see dsp/Effects/Overdrive.h).
+	drive.SetDrive(dsp::MapLinear(dsp::FullRange(driveKnob.Read(context)), 0.25f, 0.6f));
+
+	// Chorus mix is already 0 - 1, same as the knob
+	float chorusMix = dsp::FullRange(chorusKnob.Read(context));
+
+	// Delay time: MapExponential so short times get as much of the
+	// knob as long ones (see dsp/Utility.h)
+	delay.SetTimeMs(dsp::MapExponential(dsp::FullRange(delayTimeKnob.Read(context)), 50.f, 800.f));
+
+	// Feedback stops at 0.85 so the echoes always die away
+	delay.SetFeedback(dsp::MapLinear(dsp::FullRange(feedbackKnob.Read(context)), 0.f, 0.85f));
+
+	// Delay mix stops at 0.7 so the note itself stays louder than its
+	// echoes
+	delay.SetMix(dsp::MapLinear(dsp::FullRange(delayMixKnob.Read(context)), 0.f, 0.7f));
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// The sound going into the effects. To put your own sound
+		// through them instead - a guitar, a microphone - plug it
+		// into the board's audio input and use:
+		//   float sample = audioRead(context, n, 0);
+		float sample = synth.Process();
+
+		if(effectsOn)
+		{
+			// 1. Overdrive: each effect takes the sample in and gives
+			// the changed sample back, so we just overwrite it
+			sample = drive.Process(sample);
+
+			// 2. Chorus, mixed in by hand. "dry" is the sound without
+			// the effect, "wet" is with it. Fading between them lets
+			// a knob set how much effect you hear - the same trick
+			// works for any effect.
+			float dry = sample;
+			float wet = chorus.Process(sample);
+			sample = (1.f - chorusMix) * dry + chorusMix * wet;
+
+			// 3. Delay. It has its own dry/wet mix built in
+			// (delay.SetMix above), so no fading needed.
+			sample = delay.Process(sample);
+		}
+
+		// Turn the end result down by 9 dB to leave some headroom -
+		// overdrive makes the sound louder (see dsp::ApplyGain in
+		// dsp/Utility.h)
+		sample = dsp::ApplyGain(sample, -9.f);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, sample);
+		audioWrite(context, n, 1, sample);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0);   // digital pin D0
+	bypassButton.Init(context, 1); // digital pin D1
+	driveKnob.Init(0);             // analog input A0
+	chorusKnob.Init(1);            // analog input A1
+	delayTimeKnob.Init(2);         // analog input A2
+	feedbackKnob.Init(3);          // analog input A3
+	delayMixKnob.Init(4);          // analog input A4
+
+	float sampleRate = context->audioSampleRate;
+
+	// A short pluck: fades out on its own (sustain 0), so you can
+	// hear the echoes after it
+	synth.Init(sampleRate);
+	synth.SetCutoff(1200.f);
+	synth.SetAmpDecay(0.3f);
+	synth.SetAmpSustain(0.f);
+	synth.SetAmpRelease(0.1f);
+
+	// Every effect needs Init() before the sound starts. Overdrive is
+	// the only one here that doesn't need the sample rate.
+	drive.Init();
+	chorus.Init(sampleRate);
+	delay.Init(sampleRate);
+
+	// A slow, deep chorus - try your own values here
+	chorus.SetLfoFreq(0.4f);
+	chorus.SetLfoDepth(0.7f);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}
