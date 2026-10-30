@@ -53,6 +53,9 @@ class Adsr
      *  released, in seconds. */
     void SetRelease(float time_s) { env_.setReleaseRate(ToSamples(time_s)); }
 
+    /** Jumps straight back to 0 and idle, without a release. */
+    void Reset() { env_.reset(); }
+
     /** True while the envelope is anywhere but fully idle at 0. */
     bool IsRunning() { return env_.getState() != ::env_idle; }
 

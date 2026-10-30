@@ -1,0 +1,199 @@
+/** SMC26 DSP course example: sampler.
+ *
+ *  A sampler plays back a recorded sound - any sound: a drum loop, your
+ *  voice, a door slam - and lets you play with it: faster and higher,
+ *  slower and lower, backwards, or just a small slice of it, over and
+ *  over. Speed and pitch go together, like a tape or a record.
+ *
+ *  It starts with samples/drum_loop.wav (a 2-bar drum loop). Hold
+ *  playButton to play it - it loops for as long as you hold. Hold
+ *  recordButton to record your own sound from the audio input (left
+ *  channel, up to 10 seconds), let go, then play that instead.
+ *
+ *  speedKnob      slower and lower <- normal (middle) -> faster and higher
+ *  startKnob      where in the sound playback starts
+ *  lengthKnob     how much of it plays: a tiny slice up to all the rest
+ *  directionKnob  lower half = forwards, upper half = backwards
+ *  volumeKnob     overall volume
+ *
+ *  Try: start and length on a single drum hit, then tap playButton.
+ *  Or a very short length for a buzzing, robotic "stutter".
+ *
+ *  Your own sound file: put a WAV file in the samples/ folder and
+ *  change gFilename (in part 2) to its name. Mono or stereo, any sample
+ *  rate. It is read into memory at the start, so keep it short (under
+ *  a minute or so).
+ *
+ *  To try it, copy this whole file into render.cpp and type
+ *  "make run" in the terminal. Ctrl-C stops it.
+ *
+ *  Wiring:
+ *    playButton   - D0     speedKnob     - A0
+ *    recordButton - D1     startKnob     - A1
+ *                          lengthKnob    - A2
+ *                          directionKnob - A3
+ *                          volumeKnob    - A4
+ *    Something to record (a line-level source, or a mic with a
+ *    preamp) into the left audio input.
+ *  Each button connects its pin to 3.3V when pressed, with a 10k
+ *  resistor from the pin to GND (a pull-down).
+ */
+
+// The building blocks: the board (Bela.h), the sensors, and the
+// synthesis, effects, filters and utilities. You do not need to
+// change these.
+#include <Bela.h>
+#include "sensors/sensors.h"
+#include "dsp/dsp.h"
+
+// ---------------------------------------------------------------------
+// 1. Sensors
+// ---------------------------------------------------------------------
+
+Button playButton;
+Button recordButton;
+
+Potentiometer speedKnob;
+Potentiometer startKnob;
+Potentiometer lengthKnob;
+Potentiometer directionKnob;
+Potentiometer volumeKnob;
+
+// Change false to true to print the sensor values in the terminal
+bool gPrintValues = false;
+
+// Prints every sensor's value on one line. Add a line here for each
+// sensor you add. Only runs when gPrintValues is true.
+void PrintValues(BelaContext *context)
+{
+	PrintValue("play", playButton.IsPressed());
+	PrintValue("record", recordButton.IsPressed());
+	PrintValue("speed", dsp::FullRange(speedKnob.Read(context)));
+	PrintValue("start", dsp::FullRange(startKnob.Read(context)));
+	PrintValue("length", dsp::FullRange(lengthKnob.Read(context)));
+	PrintValue("direction", dsp::FullRange(directionKnob.Read(context)));
+	PrintValue("volume", dsp::FullRange(volumeKnob.Read(context)));
+	PrintLineEnd();
+}
+
+// ---------------------------------------------------------------------
+// 2. Sound
+// ---------------------------------------------------------------------
+
+// The sampler: holds the sound, and plays it back
+dsp::Sampler sampler;
+
+// The sound it starts with. The path is from the project folder.
+const char* gFilename = "samples/drum_loop.wav";
+
+// ---------------------------------------------------------------------
+// 3. render()
+// ---------------------------------------------------------------------
+
+// Called by the board over and over, very fast, each time for the
+// next few samples of sound. Keep it quick: no printf() and no waiting
+// in here, or the sound will click and drop out.
+void render(BelaContext *context, void *userData)
+{
+	// Read the buttons first, so JustPressed() and JustReleased()
+	// below see the latest change
+	playButton.Update(context);
+	recordButton.Update(context);
+
+	// Play while playButton is held. NoteOn() always starts from the
+	// beginning (of the part set by startKnob and lengthKnob).
+	if(playButton.JustPressed())
+		sampler.NoteOn();
+	if(playButton.JustReleased())
+		sampler.NoteOff();
+
+	// Record while recordButton is held. The recording replaces the
+	// sound in the sampler - the drum loop comes back next time the
+	// program starts.
+	if(recordButton.JustPressed())
+		sampler.StartRecording();
+	if(recordButton.JustReleased())
+		sampler.StopRecording();
+
+	// Speed: from a quarter (two octaves down) to 4 times (two octaves
+	// up). MapExponential puts normal speed, 1, right in the middle:
+	// a quarter and 4 are as far from 1 in each direction.
+	sampler.SetSpeed(dsp::MapExponential(dsp::FullRange(speedKnob.Read(context)), 0.25f, 4.f));
+
+	// Start and length: both 0 - 1, as parts of the whole sound. The
+	// end is the start plus length times whatever is left after it.
+	float start = dsp::FullRange(startKnob.Read(context));
+	float length = dsp::FullRange(lengthKnob.Read(context));
+	sampler.SetStart(start);
+	sampler.SetEnd(start + length * (1.f - start));
+
+	// Direction: the knob works as a switch
+	sampler.SetReverse(dsp::FullRange(directionKnob.Read(context)) > 0.5f);
+
+	// Volume from -30 dB (quiet) to 0 dB (as loud as the sound itself)
+	float volumeDb = dsp::MapLinear(dsp::FullRange(volumeKnob.Read(context)), -30.f, 0.f);
+
+	// About 10 times a second, print the sensor values - only if
+	// gPrintValues is true
+	if(gPrintValues && TimeToPrint(context))
+		PrintValues(context);
+
+	// Runs once per sample - context->audioFrames samples each time
+	for(unsigned int n = 0; n < context->audioFrames; n++)
+	{
+		// Give the sampler the left input (0) - it only keeps it while
+		// recording
+		sampler.Record(audioRead(context, n, 0));
+
+		// The next sample of the sound, in stereo, at the volume set
+		// above
+		float left, right;
+		sampler.Process(left, right);
+		left = dsp::ApplyGain(left, volumeDb);
+		right = dsp::ApplyGain(right, volumeDb);
+
+		// Send it to the left (0) and right (1) outputs
+		audioWrite(context, n, 0, left);
+		audioWrite(context, n, 1, right);
+	}
+}
+
+// ---------------------------------------------------------------------
+// 4. setup()
+// ---------------------------------------------------------------------
+
+// Runs once, before the sound starts
+bool setup(BelaContext *context, void *userData)
+{
+	// Keeps fading sounds from overloading the CPU - leave this here
+	dsp::FlushDenormals();
+
+	// Tell each sensor which pin it is plugged into
+	playButton.Init(context, 0);   // digital pin D0
+	recordButton.Init(context, 1); // digital pin D1
+	speedKnob.Init(0);             // analog input A0
+	startKnob.Init(1);             // analog input A1
+	lengthKnob.Init(2);            // analog input A2
+	directionKnob.Init(3);         // analog input A3
+	volumeKnob.Init(4);            // analog input A4
+
+	// Room for a 10 second recording, then the file. Load() reads the
+	// whole file into memory - that takes a moment, so it only ever
+	// goes here in setup(), never in render(). If the file is missing,
+	// it says so in the terminal, and you can still record.
+	sampler.Init(context->audioSampleRate, 10.f);
+	sampler.Load(gFilename);
+
+	// Loop while playButton is held. Change to false to play the
+	// sound just once per press (it still stops when you let go).
+	sampler.SetLoop(true);
+
+	// From here on, the board keeps calling render()
+	return true;
+}
+
+// Runs once when the program stops
+void cleanup(BelaContext *context, void *userData)
+{
+	// Nothing to do here
+}

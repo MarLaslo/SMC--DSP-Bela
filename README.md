@@ -19,6 +19,7 @@ This one uses Bela's words and functions, so you can read the [Bela documentatio
 | [`examples/`](examples/) | Finished instruments to copy into `render.cpp` and learn from |
 | [`dsp/`](dsp/) | Ready-made sound building blocks: synths, effects, filters, envelopes, sequencer |
 | [`sensors/`](sensors/) | One small class per sensor: knobs, buttons, touch, accelerometer, … |
+| [`samples/`](samples/) | Sound files for the sampler. Put your own WAV files here |
 | `libs/DaisySP` | The parts of the [DaisySP](https://github.com/daisyaudio/DaisySP) library that `dsp/` uses where Bela has no library of its own |
 | [`Makefile`](Makefile) | Builds and runs the project on the Bela from your computer's terminal |
 
@@ -193,7 +194,7 @@ Save your own `render.cpp` somewhere first if you want to keep it.
 
 **Instruments** ([`examples/instruments/`](examples/instruments/)):
 `additive`, `drum_sequence`, `finger_drums`, `fm_filter_envelope`, `fm_simple`, `granular_drone`,
-`modal_sequence`, `sample_hold_robot`, `strummed_strings`, `subtractive_wobble`, `wind_ocean`.
+`modal_sequence`, `sample_hold_robot`, `sampler`, `strummed_strings`, `subtractive_wobble`, `wind_ocean`.
 They all use the course board: 5 knobs on A0–A4 and 2 buttons on D0 and D1.
 
 ## Sound building blocks (`dsp::`)
@@ -209,6 +210,10 @@ float sample = osc.Process();         // get the next sample, in the loop in ren
 
 Effects and filters take the sound in: `sample = delay.Process(sample);`.
 A few don't need the sample rate and are set up with a plain `Init()`: `Noise`, `Overdrive`, `WaveFolder`, `SampleRateReducer` and `Limiter`.
+
+`Sampler` also needs a sound: `sampler.Load("samples/drum_loop.wav");` in `setup()` (never in `render()`: it reads the whole file into memory),
+or record one live from the audio input with `StartRecording()`, `Record(input)` and `StopRecording()`.
+With the IDE, upload the `samples/` folder along with the rest of the project.
 Open a class's header file in `dsp/` to see all its settings. Every header starts with a short explanation and a usage example.
 
 ### Synthesis: [`dsp/Synthesis/`](dsp/Synthesis/)
@@ -224,6 +229,7 @@ Start and stop notes with `NoteOn()` / `NoteOff()`. The noise sources have no no
 | `KarplusString`, `StringVoice` | Physical model of a plucked string |
 | `ModalVoice` | Physical model of a struck object: bells, bars, bowls |
 | `Granular` | Clouds of tiny sound grains, for drones and textures |
+| `Sampler` | Plays a WAV file, or a sound recorded from the audio input: faster, slower, backwards, or a slice in a loop |
 | `SynthBassDrum`, `SynthSnareDrum`, `HiHat` | Drum sounds |
 | `Noise`, `ColoredNoise`, `SteppedNoise` | Noise: for wind, percussion, random modulation |
 
@@ -371,6 +377,7 @@ Never put `printf()` in `render()` yourself.
 | `multiple definition of render` (or `setup`) | A second `.cpp` file has its own `render()`. Examples must stay `.cpp.txt` |
 | Runs, but no sound | Did you call `NoteOn()`? Is the volume up? Are headphones in the **output** jack? |
 | A knob only reaches about 0.8 | Wrap it in `dsp::FullRange()` |
+| `Sampler: can't open ...` in the terminal | The file isn't on the Bela, or its name is spelled differently. The path starts at the project folder: `samples/name.wav` |
 | A button doesn't react | Is `Update(context)` called at the top of `render()`? Does it have its 10 kΩ pull-down resistor? |
 | An I²C sensor `Init()` returns `false` | Check SDA and SCL aren't swapped, and the sensor has power and GND |
 | Clicks or dropouts | Something slow is in `render()`: `printf()`, `new`, a file, or waiting. Run `make cpu` while it plays: the `MSW` (mode switch) number of your program should stay the same. If it keeps going up, something in `render()` isn't real-time safe |
